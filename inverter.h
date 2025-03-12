@@ -43,6 +43,7 @@ class cInverter {
         string *GetWarnings();
 
         int GetMode();
+        char GetModeRaw();
         void ExecuteCmd(const std::string cmd);
 };
 
