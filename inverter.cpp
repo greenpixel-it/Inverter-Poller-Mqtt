@@ -63,6 +63,16 @@ int cInverter::GetMode() {
     return result;
 }
 
+char cInverter::GetModeRaw() {
+    char result;
+    m.lock();
+
+    result = mode;
+
+    m.unlock();
+    return result;
+}
+
 bool cInverter::query(const char *cmd) {
     time_t started;
     int fd;
