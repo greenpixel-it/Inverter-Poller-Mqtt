@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <fstream>
 
+#include <mosquitto.h>
 
 bool debugFlag = false;
 bool runOnce = false;
@@ -50,6 +51,13 @@ int qpiri = 98;
 int qpiws = 36;
 int qmod = 5;
 int qpigs = 110;
+
+string mqtt_server;
+int mqtt_port = 1883 ;
+string mqtt_topic;
+string mqtt_devicename;
+string mqtt_username;
+string mqtt_password;
 
 // ---------------------------------------
 
@@ -101,6 +109,18 @@ void getSettingsFile(string filename) {
                     attemptAddSetting(&qmod, linepart2);
                 else if(linepart1 == "qpigs")
                     attemptAddSetting(&qpigs, linepart2);
+                else if(linepart1 == "server")
+                    mqtt_server = linepart2;
+                else if(linepart1 == "port")
+                    attemptAddSetting(&mqtt_port, linepart2);
+                else if(linepart1 == "topic")
+                    mqtt_topic = linepart2;
+                else if(linepart1 == "devicename")
+                    mqtt_devicename = linepart2;
+                else if(linepart1 == "username")
+                    mqtt_username = linepart2;
+                else if(linepart1 == "password")
+                    mqtt_password = linepart2;
                 else
                     continue;
             }
@@ -129,8 +149,8 @@ int main(int argc, char* argv[]) {
     float pv_input_current;
     float pv_input_voltage;
     float pv_input_watts;
-    float pv_input_watthour;
-    float load_watthour = 0;
+    //float pv_input_watthour;
+    //float load_watthour = 0;
     float scc_voltage;
     int batt_discharge_current;
     char device_status[9];
@@ -178,14 +198,40 @@ int main(int argc, char* argv[]) {
     const char *settings;
 
     // Get the rest of the settings from the conf file
-    if( access( "./inverter.conf", F_OK ) != -1 ) { // file exists
-        settings = "./inverter.conf";
-    } else { // file doesn't exist
+    if( access( "/etc/inverter/inverter.conf", F_OK ) != -1 ) { // file exists
         settings = "/etc/inverter/inverter.conf";
+    } else { // file doesn't exist
+        settings = "../inverter.conf";
     }
     getSettingsFile(settings);
     int fd = open(settings, O_RDWR);
     while (flock(fd, LOCK_EX)) sleep(1);
+
+    // #### MQTT ADDON ####
+    struct mosquitto *mosq;
+    int rc;
+
+    // Mosquitto Initialization
+    mosquitto_lib_init();
+    mosq = mosquitto_new(NULL, true, NULL);
+    if (!mosq) {
+        printf("Error in the client initialization\n");
+        return 1;
+    }
+
+    // set of username and password
+    rc = mosquitto_username_pw_set(mosq, mqtt_username.c_str(), mqtt_password.c_str());
+    if (rc != MOSQ_ERR_SUCCESS) {
+        printf("Error in credential settings: %s\n", mosquitto_strerror(rc));
+        return 1;
+    }
+
+    // broker connection
+    rc = mosquitto_connect(mosq, mqtt_server.c_str(), mqtt_port, 60);
+    if (rc != MOSQ_ERR_SUCCESS) {
+        printf("Failed connecting to the broker %s\n", mosquitto_strerror(rc));
+        return 1;
+    }
 
     bool ups_status_changed(false);
     ups = new cInverter(devicename);
@@ -217,6 +263,7 @@ int main(int argc, char* argv[]) {
             ups_qpigs_changed = false;
 
             int mode = ups->GetMode();
+            char mode_raw = ups->GetModeRaw();
             string *reply1   = ups->GetQpigsStatus();
             string *reply2   = ups->GetQpiriStatus();
             string *warnings = ups->GetWarnings();
@@ -244,12 +291,12 @@ int main(int argc, char* argv[]) {
                 pv_input_watts = (scc_voltage * pv_input_current) * wattfactor;
 
                 // Calculate watt-hours generated per run interval period (given as program argument)
-                pv_input_watthour = pv_input_watts / (3600 / runinterval);
-                load_watthour = (float)load_watt / (3600 / runinterval);
+                //pv_input_watthour = pv_input_watts / (3600 / runinterval);
+                //load_watthour = (float)load_watt / (3600 / runinterval);
 
                 // Print as JSON (output is expected to be parsed by another tool...)
+                /*
                 printf("{\n");
-
                 printf("  \"Inverter_mode\":%d,\n", mode);
                 printf("  \"AC_grid_voltage\":%.1f,\n", voltage_grid);
                 printf("  \"AC_grid_frequency\":%.1f,\n", freq_grid);
@@ -284,10 +331,83 @@ int main(int argc, char* argv[]) {
                 printf("  \"Battery_redischarge_voltage\":%.1f,\n", batt_redischarge_voltage);
                 printf("  \"Warnings\":\"%s\"\n", warnings->c_str());
                 printf("}\n");
+                */
+
+                char print_str[50]; // Array piu grande per garantire spazio sufficiente
+                sprintf(print_str, "%d", mode);
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_Inverter_mode").c_str(), strlen(print_str), print_str, 0, false);
+                sprintf(print_str, "%c", mode_raw);
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_Inverter_mode_raw").c_str(), strlen(print_str), print_str, 0, false);
+                sprintf(print_str, "%.1f", voltage_grid);
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_AC_grid_voltage").c_str(), strlen(print_str), print_str, 0, false);
+                sprintf(print_str, "%.1f", freq_grid);
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_AC_grid_frequency").c_str(), strlen(print_str), print_str, 0, false);
+                sprintf(print_str, "%.1f", voltage_out);
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_AC_out_voltage").c_str(), strlen(print_str), print_str, 0, false);
+                sprintf(print_str, "%.1f", freq_out);
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_AC_out_frequency").c_str(), strlen(print_str), print_str, 0, false);
+                sprintf(print_str, "%.1f", pv_input_voltage);
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_PV_in_voltage").c_str(), strlen(print_str), print_str, 0, false);
+                sprintf(print_str, "%.1f", pv_input_current);
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_PV_in_current").c_str(), strlen(print_str), print_str, 0, false);
+                sprintf(print_str, "%.1f", pv_input_watts);
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_PV_in_watts").c_str(), strlen(print_str), print_str, 0, false);
+                //sprintf(print_str, "%.4f", pv_input_watthour);
+                //mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_PV_in_watthour").c_str(), strlen(print_str), print_str, 0, false);
+                sprintf(print_str, "%.4f", scc_voltage);
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_SCC_voltage").c_str(), strlen(print_str), print_str, 0, false);
+                sprintf(print_str, "%d", load_percent);
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_Load_pct").c_str(), strlen(print_str), print_str, 0, false);
+                sprintf(print_str, "%d", load_watt);
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_Load_watt").c_str(), strlen(print_str), print_str, 0, false);
+                //sprintf(print_str, "%.4f", load_watthour);
+                //mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_Load_watthour").c_str(), strlen(print_str), print_str, 0, false);
+                sprintf(print_str, "%d", load_va);
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_Load_va").c_str(), strlen(print_str), print_str, 0, false);
+                sprintf(print_str, "%d", voltage_bus);
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_Bus_voltage").c_str(), strlen(print_str), print_str, 0, false);
+                sprintf(print_str, "%d", temp_heatsink);
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_Heatsink_temperature").c_str(), strlen(print_str), print_str, 0, false);
+                sprintf(print_str, "%d", batt_capacity);
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_Battery_capacity").c_str(), strlen(print_str), print_str, 0, false);
+                sprintf(print_str, "%.2f", voltage_batt);
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_Battery_voltage").c_str(), strlen(print_str), print_str, 0, false);
+                sprintf(print_str, "%d", batt_charge_current);
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_Battery_charge_current").c_str(), strlen(print_str), print_str, 0, false);
+                sprintf(print_str, "%d", batt_discharge_current);
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_Battery_discharge_current").c_str(), strlen(print_str), print_str, 0, false);
+                sprintf(print_str, "%c", device_status[3]);
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_Load_status_on").c_str(), strlen(print_str), print_str, 0, false);
+                sprintf(print_str, "%c", device_status[6]);
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_SCC_charge_on").c_str(), strlen(print_str), print_str, 0, false);
+                sprintf(print_str, "%c", device_status[7]);
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_AC_charge_on").c_str(), strlen(print_str), print_str, 0, false);
+                sprintf(print_str, "%.1f", batt_recharge_voltage);
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_Battery_recharge_voltage").c_str(), strlen(print_str), print_str, 0, false);
+                sprintf(print_str, "%.1f", batt_under_voltage);
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_Battery_under_voltage").c_str(), strlen(print_str), print_str, 0, false);
+                sprintf(print_str, "%.1f", batt_bulk_voltage);
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_Battery_bulk_voltage").c_str(), strlen(print_str), print_str, 0, false);
+                sprintf(print_str, "%.1f", batt_float_voltage);
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_Battery_float_voltage").c_str(), strlen(print_str), print_str, 0, false);
+                sprintf(print_str, "%d", max_grid_charge_current);
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_Max_grid_charge_current").c_str(), strlen(print_str), print_str, 0, false);
+                sprintf(print_str, "%d", max_charge_current);
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_Max_charge_current").c_str(), strlen(print_str), print_str, 0, false);
+                sprintf(print_str, "%d", out_source_priority);
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_Out_source_priority").c_str(), strlen(print_str), print_str, 0, false);
+                sprintf(print_str, "%d", charger_source_priority);
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_Charger_source_priority").c_str(), strlen(print_str), print_str, 0, false);
+                sprintf(print_str, "%.1f", batt_redischarge_voltage);
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_Battery_redischarge_voltage").c_str(), strlen(print_str), print_str, 0, false);
+                sprintf(print_str, "%s", warnings->c_str());
+                mosquitto_publish(mosq, NULL, (mqtt_topic + "/sensor/" + mqtt_devicename + "_Warnings").c_str(), strlen(print_str), print_str, 0, false);
+
 
                 // Delete reply string so we can update with new data when polled again...
                 delete reply1;
                 delete reply2;
+                delete warnings;
             }
         } else if (ups_leave) {
             ups->terminateThread();
@@ -298,6 +418,11 @@ int main(int argc, char* argv[]) {
 
         sleep(1);
     }
+
+    // Pulizia e uscita
+    mosquitto_disconnect(mosq);
+    mosquitto_destroy(mosq);
+    mosquitto_lib_cleanup();
 
     if (ups) {
         ups->terminateThread();
